@@ -24,11 +24,11 @@ makefile内修改LDFLAGS
 
 每次连续运行3次，很奇怪，小概率出现整体速度变快一倍的现象，多数运行如下图
 
-![image-20201113213139027](/home/howkits/.config/Typora/typora-user-images/image-20201113213139027.png)
+![image-20201113213139027](figs/3.png)
 
 之前的任务中速度如下
 
-![image-20201113213401757](/home/howkits/.config/Typora/typora-user-images/image-20201113213401757.png)
+![image-20201113213401757](figs/4.png)
 
 可以看出，貌似GPU计算速度极快，但是数据的传递过程拖慢了整个过程。
 
