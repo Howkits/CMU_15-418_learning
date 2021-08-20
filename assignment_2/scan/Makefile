@@ -11,13 +11,14 @@ all: $(EXECUTABLE) $(REFERENCE)
 LOGS	   := logs
 
 ###########################################################
+ARCH=$(shell uname | sed -e 's/-.*//g')
 
 OBJDIR=objs
 CXX=g++ -m64
 CXXFLAGS=-O3 -Wall
-LDFLAGS=-L/usr/local/depot/cuda-8.0/lib64/ -lcudart
+LDFLAGS=-L/usr/local/cuda-10.1/lib64/ -lcudart
 NVCC=nvcc
-NVCCFLAGS=-O3 -m64 --gpu-architecture compute_61
+NVCCFLAGS=-O3 -m64 --gpu-architecture compute_75
 
 
 OBJS=$(OBJDIR)/main.o  $(OBJDIR)/scan.o
@@ -34,10 +35,10 @@ clean:
 		rm -rf $(OBJDIR) *.ppm *~ $(EXECUTABLE) $(LOGS)
 
 check_scan: default
-				./checker.pl scan
+				./checker.pl -m scan
 
 check_find_repeats: default
-				./checker.pl find_repeats
+				./checker.pl -m find_repeats
 
 $(EXECUTABLE): dirs $(OBJS)
 		$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)

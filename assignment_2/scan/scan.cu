@@ -11,6 +11,9 @@
 
 #include "CycleTimer.h"
 
+#define NUM_BANKS 32
+#define LOG_NUM_BANKS 5
+#define CONFLICT_FREE_OFFSET(n) ((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS)) 
 extern float toBW(int bytes, float sec);
 
 
@@ -28,6 +31,133 @@ static inline int nextPow2(int n)
     return n;
 }
 
+void printCudaTerm(int * input,int length)
+{
+    printf("printing.....:");
+    int * output=new int[length];
+    cudaMemcpy(output, input, length * sizeof(int),
+               cudaMemcpyDeviceToHost);
+    for(int i=0;i<length;i++)
+    {
+        printf("%d ",output[i]);
+    }
+    printf("\n");
+}
+
+__global__ void scan(int* device_start, int length, int* device_result)   //my solution
+{
+    __shared__ int temp[128*4];
+
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    // printf("from thread %d:",threadIdx.x);
+    if (i<length)
+    {
+        temp[threadIdx.x]=device_start[i];
+    }
+    for(unsigned int stride=1;stride<=length/2;stride*=2)
+    {
+        __syncthreads();
+        int index=(threadIdx.x+1)*stride*2-1;
+        if(index<length)
+            temp[index]+=temp[index-stride];
+        __syncthreads();
+    }    
+    
+    temp[length-1]=0;
+
+    for(unsigned int stride=length/2;stride>0;stride/=2)
+    {
+        __syncthreads();
+        int index1=(threadIdx.x+1)*stride*2-1;
+        
+        if((index1<length)&&((index1-stride)<length))
+        { 
+            int t=temp[index1];
+            temp[index1]=temp[index1-stride];
+            temp[index1-stride]=t;
+            temp[index1]+=temp[index1-stride];
+        }
+        __syncthreads();
+    }
+    
+    if(i<length)
+        device_result[i]=temp[i];
+    
+    // printf("res:%d\n",device_result[i]);
+}
+
+__global__ void exclusive_scan_gpu(int* input, int* output, int n)    //offical solution with Avoiding Bank Conflicts
+{
+    __shared__ int temp[4 * 64];
+    int thid_global = 2 * blockIdx.x * blockDim.x + threadIdx.x;
+    int thid = threadIdx.x;
+  
+    {  
+      int offset = 1;
+      //temp[2 * thid] = input[2 * thid_global];
+      //temp[2 * thid + 1] = input[2 * thid_global + 1];
+      
+      int aind = thid;
+      int bind = thid + n / 2;
+      int bankOffsetA = CONFLICT_FREE_OFFSET(aind);
+      int bankOffsetB = CONFLICT_FREE_OFFSET(bind);
+      temp[aind + bankOffsetA] = input[thid_global];
+      temp[bind + bankOffsetB] = input[thid_global + n / 2];  
+       
+  
+      for (int d = n >> 1; d > 0; d >>= 1) {
+        __syncthreads();
+        if (thid < d) {
+          int ai = offset * (2 * thid + 1) - 1;
+          int bi = offset * (2 * thid + 2) - 1;
+          ai += CONFLICT_FREE_OFFSET(ai);
+          bi += CONFLICT_FREE_OFFSET(bi);
+          temp[bi] += temp[ai];
+        }
+        offset *= 2;
+      }
+  
+      if (thid == 0) { 
+        //temp[n - 1] = 0;
+        temp[n - 1 + CONFLICT_FREE_OFFSET(n - 1)] = 0;
+      }
+  
+      for (int d = 1; d < n; d *= 2) {
+        offset >>= 1;
+        __syncthreads();
+        if (thid < d) {
+          int ai = offset * (2 * thid + 1) - 1;
+          int bi = offset * (2 * thid + 2) - 1;
+          ai += CONFLICT_FREE_OFFSET(ai);
+          bi += CONFLICT_FREE_OFFSET(bi);
+          int t = temp[ai];
+          temp[ai] = temp[bi];
+          temp[bi] += t;
+        }
+      }
+  
+      __syncthreads();
+      //output[2 * thid_global] = temp[2 * thid];
+      //output[2 * thid_global + 1] = temp[2 * thid + 1];
+      //printf("%d:%d %d:%d\n", 2 * thid_global, output[2 * thid_global], 2 * thid_global + 1, output[2 * thid_global + 1]);
+      output[thid_global] = temp[aind + bankOffsetA];
+      output[thid_global + n / 2] = temp[bind + bankOffsetB];
+    }
+}
+
+__global__ void add_base_gpu(int* device_input, int* device_output, int block_index) 
+{
+    int block_last_element = block_index * 128 * 2 - 1;
+    
+    int base = device_input[block_last_element] + device_output[block_last_element];
+    
+    int thid = block_index * blockDim.x + threadIdx.x;
+  
+    device_output[2 * thid] += base;
+    device_output[2 * thid + 1] += base;
+}
+
+
 void exclusive_scan(int* device_start, int length, int* device_result)
 {
     /* Fill in this function with your exclusive scan implementation.
@@ -39,6 +169,22 @@ void exclusive_scan(int* device_start, int length, int* device_result)
      * both the input and the output arrays are sized to accommodate the next
      * power of 2 larger than the input.
      */
+
+    const int threadsPerBlock = 128;
+    // const int threadsPerBlock = 16;
+    // int blocks = (length + threadsPerBlock - 1) / threadsPerBlock;
+    int blocks =  length / (threadsPerBlock * 2);
+    if(blocks==0)
+        blocks=1;
+    // scan<<<blocks,threadsPerBlock>>>(device_start,threadsPerBlock,device_result);
+    exclusive_scan_gpu<<<blocks,threadsPerBlock>>>(device_start,device_result,length/blocks);
+
+    cudaThreadSynchronize();
+
+    for(int i=1;i<blocks;i++)
+    {
+        add_base_gpu<<<1,threadsPerBlock>>>(device_start,device_result,i);
+    }
 }
 
 /* This function is a wrapper around the code you will write - it copies the
@@ -71,13 +217,14 @@ double cudaScan(int* inarray, int* end, int* resultarray)
 
     double startTime = CycleTimer::currentSeconds();
 
-    exclusive_scan(device_input, end - inarray, device_result);
+    // exclusive_scan(device_input, end - inarray, device_result);
+    exclusive_scan(device_input, rounded_length, device_result);
 
     // Wait for any work left over to be completed.
     cudaThreadSynchronize();
     double endTime = CycleTimer::currentSeconds();
     double overallDuration = endTime - startTime;
-    
+
     cudaMemcpy(resultarray, device_result, (end - inarray) * sizeof(int),
                cudaMemcpyDeviceToHost);
     return overallDuration;
@@ -113,7 +260,28 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
-int find_repeats(int *device_input, int length, int *device_output) {
+__global__ void mark_repeats_gpu(int *device_input,int length,int *flags)
+{
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i<length-1)
+    {
+        if(device_input[i]==device_input[i+1])
+            flags[i]=1;
+        else
+            flags[i]=0;
+    }
+}
+
+__global__ void  get_repeat_results(int* input,int* flags,int* flags_scanned,int length,int* output)
+{
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if((i<length-1)&&(flags_scanned[i]<flags_scanned[i+1]))
+    {
+        output[flags_scanned[i]]=i;
+    }
+}
+
+int find_repeats(int *device_input, int length, int N, int *device_output) {
     /* Finds all pairs of adjacent repeated elements in the list, storing the
      * indices of the first element of each pair (in order) into device_result.
      * Returns the number of pairs found.
@@ -125,7 +293,53 @@ int find_repeats(int *device_input, int length, int *device_output) {
      * it requires that. However, you must ensure that the results of
      * find_repeats are correct given the original length.
      */    
-    return 0;
+    const int threadsPerBlock = 128;
+    // const int threadsPerBlock = 16;
+    // const int blocks = (length + threadsPerBlock - 1) / threadsPerBlock;
+    int blocks = length/(threadsPerBlock);
+    if(blocks==0)
+        blocks=1;
+
+    int *flags;
+    int *flags_scanned;
+    cudaMalloc((void **)&flags,length*sizeof(int));
+    cudaMalloc((void **)&flags_scanned,length*sizeof(int));
+    
+    mark_repeats_gpu<<<blocks,threadsPerBlock>>>(device_input,length,flags);
+    
+    exclusive_scan(flags,length,flags_scanned);
+
+    // cudaThreadSynchronize();
+
+    // for (int i = 1; i < blocks; i++)
+    //     add_base_gpu<<<1, threadsPerBlock>>>(flags, flags_scanned, i);
+
+    // printCudaTerm(flags,length);
+    // printCudaTerm(flags_scanned,length);
+
+    get_repeat_results<<<blocks,threadsPerBlock>>>(device_input,flags,flags_scanned,N,device_output);
+
+    // cudaThreadSynchronize();
+
+    // printCudaTerm(device_output,length);
+
+    // printf("===========================\n");
+    
+    int *output=new int[length];
+    cudaMemcpy(output, device_output, length * sizeof(int),
+               cudaMemcpyDeviceToHost);
+    if(N<=1)
+        return 0;
+    int ans=1;
+    for(int i=1;i<N;i++)
+    {
+        if(output[i]>0&&output[i]>output[i-1])
+            ans++;
+        else
+            break;
+    }
+
+    return ans;
 }
 
 /* Timing wrapper around find_repeats. You should not modify this function.
@@ -141,7 +355,7 @@ double cudaFindRepeats(int *input, int length, int *output, int *output_length) 
 
     double startTime = CycleTimer::currentSeconds();
     
-    int result = find_repeats(device_input, length, device_output);
+    int result = find_repeats(device_input, rounded_length, length, device_output);
 
     cudaThreadSynchronize();
     double endTime = CycleTimer::currentSeconds();
@@ -179,3 +393,4 @@ void printCudaInfo()
     }
     printf("---------------------------------------------------------\n"); 
 }
+

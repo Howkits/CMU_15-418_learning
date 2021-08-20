@@ -23,7 +23,7 @@ my $thrust_flag = '';
 sub usage {
     printf STDERR "$_[0]";
     printf STDERR "Usage: $0 [-h] [-t] [-m MODE] [-i INPUT]\n";
-    printf STDERR "    -h         Print this message\n";
+    printf STDERR "    -h         Print this message\n";    
     printf STDERR "    -t         Use thrust implementation as performance target\n";
     printf STDERR "    -m MODE    Specify mode (either 'scan' or 'find_repeats'\n";
     printf STDERR "    -i INPUT   Specify input (either 'test1' or 'random'\n";
